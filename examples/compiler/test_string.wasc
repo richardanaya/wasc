@@ -1,0 +1,4 @@
+export i32 main() {
+    i32 ptr = "Hello, World!";
+    return 42;
+}

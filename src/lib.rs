@@ -1723,6 +1723,9 @@ struct CodeGen {
     memories: Vec<Limits>,
     exports: Vec<webassembly::Export>,
     codes: Vec<webassembly::Code>,
+    // String literal storage: offset -> string data
+    string_literals: Vec<(u32, String)>,
+    next_data_offset: u32,
 }
 
 impl CodeGen {
@@ -1741,6 +1744,8 @@ impl CodeGen {
             memories: Vec::new(),
             exports: Vec::new(),
             codes: Vec::new(),
+            string_literals: Vec::new(),
+            next_data_offset: 0,
         }
     }
 
@@ -1867,6 +1872,25 @@ impl CodeGen {
             sections.push(Section::Code(self.codes));
         }
 
+        // Data section (for string literals)
+        if !self.string_literals.is_empty() {
+            let mut datas = Vec::new();
+            for (offset, string) in self.string_literals {
+                // Add null terminator
+                let mut init = string.into_bytes();
+                init.push(0); // Null terminator
+
+                datas.push(webassembly::Data {
+                    mode: webassembly::DataMode::Active {
+                        memory: 0, // Memory index 0
+                        offset: vec![Instruction::I32Const(offset as i32)],
+                    },
+                    init,
+                });
+            }
+            sections.push(Section::Data(datas));
+        }
+
         sections
     }
 
@@ -1986,7 +2010,7 @@ impl CodeGen {
     }
 
     fn generate_statement(
-        &self,
+        &mut self,
         instructions: &mut Vec<Instruction>,
         stmt: &Statement,
     ) -> Result<(), CompileError> {
@@ -2117,7 +2141,7 @@ impl CodeGen {
     }
 
     fn generate_expression(
-        &self,
+        &mut self,
         instructions: &mut Vec<Instruction>,
         expr: &Expression,
     ) -> Result<(), CompileError> {
@@ -2142,9 +2166,12 @@ impl CodeGen {
                 instructions.push(Instruction::I32Const(if *b { 1 } else { 0 }));
                 Ok(())
             }
-            Expression::StringLiteral(_) => Err(CompileError::CodeGenError {
-                message: String::from("string literals not yet implemented"),
-            }),
+            Expression::StringLiteral(s) => {
+                // Allocate string in data section and return offset
+                let offset = self.add_string_literal(s.clone());
+                instructions.push(Instruction::I32Const(offset as i32));
+                Ok(())
+            }
             Expression::Variable(name) => {
                 if let Some((idx, _)) = self.local_indices.get(name) {
                     instructions.push(Instruction::LocalGet(*idx));
@@ -2318,6 +2345,19 @@ impl CodeGen {
             *grouped.entry(ty.clone()).or_insert(0) += 1;
         }
         grouped.into_iter().map(|(t, c)| (c, t)).collect()
+    }
+
+    fn add_string_literal(&mut self, s: String) -> u32 {
+        // For simplicity, store strings with a null terminator
+        let offset = self.next_data_offset;
+        let data = s.into_bytes();
+        let len = data.len() as u32 + 1; // +1 for null terminator
+
+        self.string_literals
+            .push((offset, String::from_utf8(data).unwrap_or_default()));
+        self.next_data_offset += len;
+
+        offset
     }
 
     fn get_import_index(&self, name: &str) -> Option<u32> {
