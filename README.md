@@ -134,19 +134,58 @@ table[0] = &my_callback;
 funcref callback = table[0];
 ```
 
+### Memory Operations
+```wasc
+memory 1;
+
+export i32 test_memory() {
+    i32 ptr = 0;
+    *ptr = 123;      // Store 123 at memory address 0
+    return *ptr;      // Load from memory address 0
+}
+```
+
+### String Literals
+```wasc
+export i32 main() {
+    i32 message = "Hello, World!";  // Returns pointer to string in data section
+    return 0;
+}
+```
+
 ### Operators
 - Arithmetic: `+`, `-`, `*`, `/`, `%`
 - Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
 - Logical: `&&`, `||`, `!`
 - Bitwise: `&`, `|`, `^`, `~`, `<<`, `>>`
 
+## Browser Compiler
+
+Try the online compiler at `examples/compiler/index.html`:
+```bash
+cd examples/compiler
+python3 -m http.server 8767
+# Open http://localhost:8767
+```
+
+Features:
+- Real-time compilation
+- Runtime execution with JavaScript interop
+- Multiple code examples
+- Download compiled WASM
+
 ## Building
 
 ```bash
-cargo build --release
+# CLI tool
+cargo build --release --features cli
+
+# WASM library for browsers
+cargo build --target wasm32-unknown-unknown --release
+wasm-bindgen --target web --out-dir examples/compiler target/wasm32-unknown-unknown/release/wasc.wasm
 ```
 
-The binary will be at `target/release/wasc`.
+The CLI binary will be at `target/release/wasc`.
 
 ## WebAssembly Output
 
