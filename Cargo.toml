@@ -2,6 +2,9 @@
 name = "wasc"
 version = "2024.0.0"
 edition = "2021"
+description = "A C-like language compiler for WebAssembly with first-class support for references and tables"
+license = "MIT"
+repository = "https://github.com/richardanaya/wasc"
 
 [dependencies]
 webassembly = "0.10.0"
