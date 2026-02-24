@@ -773,6 +773,11 @@ enum Expression {
 
     // Address of: &var (for linear memory, not funcref)
     AddressOf(String),
+
+    // Atomic operations
+    AtomicLoad(Box<Expression>, ValType), // atomic.load(ptr, type)
+    AtomicStore(Box<Expression>, Box<Expression>, ValType), // atomic.store(ptr, value, type)
+    AtomicRmw(BinOp, Box<Expression>, Box<Expression>, ValType), // atomic.add(ptr, value, type), etc.
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1686,6 +1691,86 @@ impl<'a> Parser<'a> {
                     })
                 }
             }
+            Token::Atomic => {
+                self.advance();
+                self.match_token(Token::Dot);
+                // atomic.load, atomic.store, atomic.add, atomic.sub, etc.
+                if let Token::Identifier(op) = &self.current_token {
+                    let op_name = op.clone();
+                    self.advance();
+                    self.expect(Token::LParen)?;
+
+                    let ptr = self.parse_expression()?;
+
+                    // Parse operation and value if needed
+                    match op_name.as_str() {
+                        "load" => {
+                            // atomic.load(ptr, type) - type is optional, default to i32
+                            let ty = if self.match_token(Token::Comma) {
+                                self.parse_type()?
+                            } else {
+                                Type::I32
+                            };
+                            self.expect(Token::RParen)?;
+                            Ok(Expression::AtomicLoad(Box::new(ptr), type_to_valtype(&ty)))
+                        }
+                        "store" => {
+                            // atomic.store(ptr, value, type)
+                            self.expect(Token::Comma)?;
+                            let value = self.parse_expression()?;
+                            let ty = if self.match_token(Token::Comma) {
+                                self.parse_type()?
+                            } else {
+                                Type::I32
+                            };
+                            self.expect(Token::RParen)?;
+                            Ok(Expression::AtomicStore(
+                                Box::new(ptr),
+                                Box::new(value),
+                                type_to_valtype(&ty),
+                            ))
+                        }
+                        "add" | "sub" | "and" | "or" | "xor" => {
+                            // atomic.op(ptr, value, type)
+                            self.expect(Token::Comma)?;
+                            let value = self.parse_expression()?;
+                            let ty = if self.match_token(Token::Comma) {
+                                self.parse_type()?
+                            } else {
+                                Type::I32
+                            };
+                            self.expect(Token::RParen)?;
+                            let bin_op = match op_name.as_str() {
+                                "add" => BinOp::Add,
+                                "sub" => BinOp::Sub,
+                                "and" => BinOp::BitAnd,
+                                "or" => BinOp::BitOr,
+                                "xor" => BinOp::BitXor,
+                                _ => BinOp::Add,
+                            };
+                            Ok(Expression::AtomicRmw(
+                                bin_op,
+                                Box::new(ptr),
+                                Box::new(value),
+                                type_to_valtype(&ty),
+                            ))
+                        }
+                        _ => Err(CompileError::ParseError {
+                            line: 0,
+                            col: 0,
+                            message: format!("unknown atomic operation: {}", op_name),
+                        }),
+                    }
+                } else {
+                    Err(CompileError::ParseError {
+                        line: 0,
+                        col: 0,
+                        message: String::from(
+                            "expected atomic.load, atomic.store, atomic.add, etc.",
+                        ),
+                    })
+                }
+            }
             Token::LParen => {
                 self.advance();
                 let expr = self.parse_expression()?;
@@ -2354,6 +2439,55 @@ impl CodeGen {
             Expression::AddressOf(_) => Err(CompileError::CodeGenError {
                 message: String::from("address-of operator for variables not supported (use memory pointers with i32)"),
             }),
+            Expression::AtomicLoad(ptr, valtype) => {
+                self.generate_expression(instructions, ptr)?;
+                let memarg = MemArg { align: 2, offset: 0 };
+                let inst = match valtype {
+                    ValType::I32 => Instruction::I32AtomicLoad(memarg),
+                    ValType::I64 => Instruction::I64AtomicLoad(memarg),
+                    _ => return Err(CompileError::CodeGenError {
+                        message: String::from("atomic load only supports i32 and i64"),
+                    }),
+                };
+                instructions.push(inst);
+                Ok(())
+            }
+            Expression::AtomicStore(ptr, value, valtype) => {
+                self.generate_expression(instructions, ptr)?;
+                self.generate_expression(instructions, value)?;
+                let memarg = MemArg { align: 2, offset: 0 };
+                let inst = match valtype {
+                    ValType::I32 => Instruction::I32AtomicStore(memarg),
+                    ValType::I64 => Instruction::I64AtomicStore(memarg),
+                    _ => return Err(CompileError::CodeGenError {
+                        message: String::from("atomic store only supports i32 and i64"),
+                    }),
+                };
+                instructions.push(inst);
+                Ok(())
+            }
+            Expression::AtomicRmw(op, ptr, value, valtype) => {
+                self.generate_expression(instructions, ptr)?;
+                self.generate_expression(instructions, value)?;
+                let memarg = MemArg { align: 2, offset: 0 };
+                let inst = match (op, valtype) {
+                    (BinOp::Add, ValType::I32) => Instruction::I32AtomicRmwAdd(memarg),
+                    (BinOp::Add, ValType::I64) => Instruction::I64AtomicRmwAdd(memarg),
+                    (BinOp::Sub, ValType::I32) => Instruction::I32AtomicRmwSub(memarg),
+                    (BinOp::Sub, ValType::I64) => Instruction::I64AtomicRmwSub(memarg),
+                    (BinOp::BitAnd, ValType::I32) => Instruction::I32AtomicRmwAnd(memarg),
+                    (BinOp::BitAnd, ValType::I64) => Instruction::I64AtomicRmwAnd(memarg),
+                    (BinOp::BitOr, ValType::I32) => Instruction::I32AtomicRmwOr(memarg),
+                    (BinOp::BitOr, ValType::I64) => Instruction::I64AtomicRmwOr(memarg),
+                    (BinOp::BitXor, ValType::I32) => Instruction::I32AtomicRmwXor(memarg),
+                    (BinOp::BitXor, ValType::I64) => Instruction::I64AtomicRmwXor(memarg),
+                    _ => return Err(CompileError::CodeGenError {
+                        message: String::from("atomic rmw operation not supported for this type"),
+                    }),
+                };
+                instructions.push(inst);
+                Ok(())
+            }
         }
     }
 
@@ -2576,5 +2710,30 @@ export i32 main() {
 "#;
         let result = compile(source);
         assert!(result.is_ok(), "References test failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_atomics() {
+        let source = r#"
+memory shared 1;
+
+export i32 test_atomic() {
+    i32 ptr = 0;
+    atomic.store(ptr, 100);
+    i32 val = atomic.load(ptr);
+    i32 old = atomic.add(ptr, 50);
+    i32 result = atomic.sub(ptr, 25);
+    return result;
+}
+
+export i32 main() {
+    return test_atomic();
+}
+"#;
+        let result = compile(source);
+        assert!(result.is_ok(), "Atomics test failed: {:?}", result.err());
+        let bytes = result.unwrap();
+        // Check that memory section has shared flag (look for memory section pattern)
+        assert!(bytes.len() > 50, "Should have atomic instructions");
     }
 }

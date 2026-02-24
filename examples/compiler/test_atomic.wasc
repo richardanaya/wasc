@@ -1,0 +1,24 @@
+// Test atomic operations
+memory shared 1;
+
+export i32 test_atomic() {
+    i32 ptr = 0;
+    
+    // Atomic store
+    atomic.store(ptr, 100);
+    
+    // Atomic load
+    i32 val = atomic.load(ptr);
+    
+    // Atomic add
+    i32 old = atomic.add(ptr, 50);
+    
+    // Atomic sub
+    i32 result = atomic.sub(ptr, 25);
+    
+    return result;
+}
+
+export i32 main() {
+    return test_atomic();
+}
