@@ -91,6 +91,26 @@ pub enum CompileError {
     },
 }
 
+impl core::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CompileError::LexError { line, col, message } => {
+                write!(f, "Lex error at line {}, column {}: {}", line, col, message)
+            }
+            CompileError::ParseError { line, col, message } => {
+                write!(
+                    f,
+                    "Parse error at line {}, column {}: {}",
+                    line, col, message
+                )
+            }
+            CompileError::CodeGenError { message } => {
+                write!(f, "Code generation error: {}", message)
+            }
+        }
+    }
+}
+
 // ============================================================================
 // LEXER
 // ============================================================================
