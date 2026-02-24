@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WASC - WebAssembly Compiler</title>
+    <title>WASC - WebAssembly Compiler & Runner</title>
     <style>
         * {
             box-sizing: border-box;
@@ -41,6 +41,7 @@
             flex: 1;
             display: grid;
             grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr 1fr;
             gap: 1px;
             background: #3e3e42;
         }
@@ -48,7 +49,7 @@
         @media (max-width: 768px) {
             main {
                 grid-template-columns: 1fr;
-                grid-template-rows: 1fr 1fr;
+                grid-template-rows: 1fr 1fr 1fr 1fr;
             }
         }
         
@@ -56,6 +57,7 @@
             background: #1e1e1e;
             display: flex;
             flex-direction: column;
+            min-height: 200px;
         }
         
         .panel-header {
@@ -107,9 +109,18 @@
             background: #4e4e52;
         }
         
+        button.success {
+            background: #4ec9b0;
+        }
+        
+        button.success:hover {
+            background: #3da892;
+        }
+        
         .panel-content {
             flex: 1;
             position: relative;
+            overflow: hidden;
         }
         
         textarea, .output {
@@ -144,6 +155,10 @@
             color: #569cd6;
         }
         
+        .warning {
+            color: #dcdcaa;
+        }
+        
         .loading {
             display: flex;
             align-items: center;
@@ -170,12 +185,41 @@
             background: #2d2d30;
             border-color: #4e4e52;
         }
+        
+        .runtime-section {
+            margin-top: 0.5rem;
+            padding-top: 0.5rem;
+            border-top: 1px solid #3e3e42;
+        }
+        
+        .function-call {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+            align-items: center;
+        }
+        
+        .function-call input {
+            background: #2d2d30;
+            border: 1px solid #3e3e42;
+            color: #d4d4d4;
+            padding: 0.3rem;
+            border-radius: 3px;
+            font-family: inherit;
+        }
+        
+        .log-entry {
+            margin: 0.25rem 0;
+            padding: 0.25rem 0.5rem;
+            background: #252526;
+            border-left: 3px solid #4ec9b0;
+        }
     </style>
 </head>
 <body>
     <header>
-        <h1>WASC Compiler</h1>
-        <div class="subtitle">Compile C-like code to WebAssembly in your browser</div>
+        <h1>WASC Compiler & Runtime</h1>
+        <div class="subtitle">Compile C-like code to WebAssembly and run it in your browser</div>
     </header>
     
     <main>
@@ -185,7 +229,8 @@
                 <div class="examples">
                     <button class="example-btn secondary" onclick="loadExample('simple')">Simple</button>
                     <button class="example-btn secondary" onclick="loadExample('refs')">References</button>
-                    <button class="example-btn secondary" onclick="loadExample('memory')">Memory</button>
+                    <button class="example-btn secondary" onclick="loadExample('console')">Console</button>
+                    <button class="example-btn secondary" onclick="loadExample('add')">Add</button>
                 </div>
             </div>
             <div class="panel-content">
@@ -201,15 +246,43 @@ export i32 main() {
         
         <div class="panel">
             <div class="panel-header">
-                <span class="panel-title">Output</span>
+                <span class="panel-title">Compilation Output</span>
                 <div class="panel-actions">
                     <button id="compileBtn" onclick="compile()">Compile</button>
-                    <button class="secondary" onclick="downloadWasm()" id="downloadBtn" disabled>Download .wasm</button>
+                    <button class="secondary" onclick="downloadWasm()" id="downloadBtn" disabled>Download</button>
                 </div>
             </div>
             <div class="panel-content">
                 <div id="output" class="output">
                     <div class="loading">Click "Compile" to generate WebAssembly</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <div class="panel-header">
+                <span class="panel-title">Runtime</span>
+                <div class="panel-actions">
+                    <button class="success" onclick="runWasm()" id="runBtn" disabled>▶ Run WASM</button>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div id="runtime" class="output">
+                    <div class="loading">Compile first, then run the WASM module</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <div class="panel-header">
+                <span class="panel-title">Execution Log</span>
+                <div class="panel-actions">
+                    <button class="secondary" onclick="clearLog()">Clear</button>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div id="log" class="output">
+                    <span class="info">Execution log will appear here...</span>
                 </div>
             </div>
         </div>
@@ -220,6 +293,7 @@ export i32 main() {
         
         let wasmModule = null;
         let lastCompiledBytes = null;
+        let wasmInstance = null;
         
         // Initialize WASM
         async function initWasm() {
@@ -243,9 +317,13 @@ export i32 main() {
             const source = document.getElementById('source').value;
             const output = document.getElementById('output');
             const downloadBtn = document.getElementById('downloadBtn');
+            const runBtn = document.getElementById('runBtn');
+            
+            // Reset runtime state
+            wasmInstance = null;
+            runBtn.disabled = true;
             
             output.innerHTML = '<span class="info">Compiling...</span>';
-            downloadBtn.disabled = true;
             
             try {
                 const bytes = wasmModule.compile_wasm(source);
@@ -257,22 +335,105 @@ export i32 main() {
                     .map(b => b.toString(16).padStart(2, '0'))
                     .join(' ');
                 
+                // Decode to get imports/exports info
+                const wasmModuleInfo = await WebAssembly.compile(bytes);
+                const imports = WebAssembly.Module.imports(wasmModuleInfo);
+                const exports = WebAssembly.Module.exports(wasmModuleInfo);
+                
                 output.innerHTML = `<span class="success">✓ Compilation successful!</span>
 
 <span class="info">Size:</span> ${size} bytes
 <span class="info">Hex preview:</span> ${hexPreview}${size > 32 ? '...' : ''}
 
-<span class="info">You can download the .wasm file or run it in the browser.</span>`;
+<span class="info">Imports (${imports.length}):</span>
+${imports.map(i => `  ${i.kind} ${i.module}.${i.name}`).join('\n') || '  None'}
+
+<span class="info">Exports (${exports.length}):</span>
+${exports.map(e => `  ${e.kind} ${e.name}`).join('\n') || '  None'}`;
                 
                 downloadBtn.disabled = false;
+                runBtn.disabled = false;
+                document.getElementById('runtime').innerHTML = '<span class="info">Ready to run! Click "Run WASM" to execute.</span>';
                 
-                // Also log to console
                 console.log('Compiled WASM:', bytes);
+                console.log('Imports:', imports);
+                console.log('Exports:', exports);
                 
             } catch (e) {
                 output.innerHTML = `<span class="error">✗ Compilation error:\n${e}</span>`;
                 console.error(e);
                 lastCompiledBytes = null;
+                downloadBtn.disabled = true;
+                runBtn.disabled = true;
+            }
+        };
+        
+        // Run WASM function
+        window.runWasm = async function() {
+            if (!lastCompiledBytes) {
+                document.getElementById('runtime').innerHTML = '<span class="error">No compiled WASM to run</span>';
+                return;
+            }
+            
+            const runtime = document.getElementById('runtime');
+            const log = document.getElementById('log');
+            
+            // Clear previous log
+            log.innerHTML = '';
+            
+            // Create import object with console.log support
+            const importObject = {
+                env: {
+                    memory: new WebAssembly.Memory({ initial: 1 }),
+                    console_log: (msg) => {
+                        const entry = document.createElement('div');
+                        entry.className = 'log-entry';
+                        entry.innerHTML = `<span class="success">[console.log]</span> ${msg}`;
+                        log.appendChild(entry);
+                        console.log('[WASM console.log]:', msg);
+                    }
+                }
+            };
+            
+            try {
+                runtime.innerHTML = '<span class="info">Instantiating WASM module...</span>';
+                
+                const wasmModule = await WebAssembly.compile(lastCompiledBytes);
+                wasmInstance = await WebAssembly.instantiate(wasmModule, importObject);
+                
+                // Display available exports
+                const exports = Object.keys(wasmInstance.exports);
+                let runtimeHtml = `<span class="success">✓ WASM module instantiated!</span>
+
+<span class="info">Available exports:</span>
+${exports.map(e => `  • ${e}`).join('\n')}
+
+<span class="info">Execution results:</span>`;
+                
+                // Auto-call functions
+                for (const name of exports) {
+                    const fn = wasmInstance.exports[name];
+                    if (typeof fn === 'function') {
+                        try {
+                            const result = fn();
+                            runtimeHtml += `\n  ${name}() = <span class="success">${result}</span>`;
+                            
+                            // Also log it
+                            const entry = document.createElement('div');
+                            entry.className = 'log-entry';
+                            entry.innerHTML = `<span class="info">[call]</span> ${name}() → <span class="success">${result}</span>`;
+                            log.appendChild(entry);
+                        } catch (e) {
+                            runtimeHtml += `\n  ${name}() = <span class="error">Error: ${e.message}</span>`;
+                        }
+                    }
+                }
+                
+                runtime.innerHTML = runtimeHtml;
+                
+            } catch (e) {
+                runtime.innerHTML = `<span class="error">✗ Runtime error:\n${e.message}</span>`;
+                console.error(e);
             }
         };
         
@@ -287,6 +448,11 @@ export i32 main() {
             a.download = 'output.wasm';
             a.click();
             URL.revokeObjectURL(url);
+        };
+        
+        // Clear log
+        window.clearLog = function() {
+            document.getElementById('log').innerHTML = '<span class="info">Execution log cleared.</span>';
         };
         
         // Load examples
@@ -313,17 +479,34 @@ export i32 test_refs() {
 export i32 main() {
     return test_refs();
 }`,
-                memory: `// Memory operations example
+                console: `// Call JavaScript console.log from WASM
 memory 1;
 
+extern void console_log(externref msg);
+
+export void greet() {
+    console_log("Hello from WASM!");
+    console_log("The current time is: ");
+}
+
 export i32 main() {
-    i32 x = 100;
-    i32 y = 200;
-    return x + y;
+    greet();
+    return 0;
+}`,
+                add: `// Simple add function
+export i32 add(i32 a, i32 b) {
+    return a + b;
+}
+
+export i32 main() {
+    return add(10, 32);
 }`
             };
             
             document.getElementById('source').value = examples[name] || examples.simple;
+            
+            // Auto-compile when loading example
+            window.compile();
         };
         
         // Initialize
