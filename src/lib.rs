@@ -9,17 +9,33 @@
 //! - Zero-overhead external function calls
 //! - No standard library - you control everything
 
-#![no_std]
+#![cfg_attr(target_arch = "wasm32", no_std)]
+#[cfg(target_arch = "wasm32")]
 extern crate alloc;
 
 #[cfg(test)]
 extern crate std;
 
+#[cfg(target_arch = "wasm32")]
 use alloc::boxed::Box;
+#[cfg(target_arch = "wasm32")]
 use alloc::collections::BTreeMap;
+#[cfg(target_arch = "wasm32")]
 use alloc::string::String;
+#[cfg(target_arch = "wasm32")]
 use alloc::vec::Vec;
+#[cfg(target_arch = "wasm32")]
 use alloc::{format, vec};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::boxed::Box;
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::string::String;
+#[cfg(not(target_arch = "wasm32"))]
+use std::vec::Vec;
+
 use webassembly::*;
 
 // ============================================================================
