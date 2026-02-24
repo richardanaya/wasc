@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WASC - WebAssembly Compiler</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        header {
+            background: #2d2d30;
+            padding: 1rem 2rem;
+            border-bottom: 1px solid #3e3e42;
+        }
+        
+        h1 {
+            font-size: 1.5rem;
+            color: #4ec9b0;
+        }
+        
+        .subtitle {
+            color: #808080;
+            font-size: 0.9rem;
+            margin-top: 0.25rem;
+        }
+        
+        main {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1px;
+            background: #3e3e42;
+        }
+        
+        @media (max-width: 768px) {
+            main {
+                grid-template-columns: 1fr;
+                grid-template-rows: 1fr 1fr;
+            }
+        }
+        
+        .panel {
+            background: #1e1e1e;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .panel-header {
+            background: #2d2d30;
+            padding: 0.5rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #3e3e42;
+        }
+        
+        .panel-title {
+            font-size: 0.9rem;
+            color: #cccccc;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .panel-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        
+        button {
+            background: #0e639c;
+            color: white;
+            border: none;
+            padding: 0.4rem 1rem;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: background 0.2s;
+        }
+        
+        button:hover {
+            background: #1177bb;
+        }
+        
+        button:disabled {
+            background: #3e3e42;
+            cursor: not-allowed;
+        }
+        
+        button.secondary {
+            background: #3e3e42;
+        }
+        
+        button.secondary:hover {
+            background: #4e4e52;
+        }
+        
+        .panel-content {
+            flex: 1;
+            position: relative;
+        }
+        
+        textarea, .output {
+            width: 100%;
+            height: 100%;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border: none;
+            padding: 1rem;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.5;
+            resize: none;
+            outline: none;
+        }
+        
+        .output {
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        
+        .error {
+            color: #f48771;
+        }
+        
+        .success {
+            color: #4ec9b0;
+        }
+        
+        .info {
+            color: #569cd6;
+        }
+        
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #808080;
+        }
+        
+        .examples {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        
+        .example-btn {
+            background: #252526;
+            border: 1px solid #3e3e42;
+            color: #9cdcfe;
+            padding: 0.3rem 0.8rem;
+            font-size: 0.8rem;
+        }
+        
+        .example-btn:hover {
+            background: #2d2d30;
+            border-color: #4e4e52;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>WASC Compiler</h1>
+        <div class="subtitle">Compile C-like code to WebAssembly in your browser</div>
+    </header>
+    
+    <main>
+        <div class="panel">
+            <div class="panel-header">
+                <span class="panel-title">Source Code</span>
+                <div class="examples">
+                    <button class="example-btn secondary" onclick="loadExample('simple')">Simple</button>
+                    <button class="example-btn secondary" onclick="loadExample('refs')">References</button>
+                    <button class="example-btn secondary" onclick="loadExample('memory')">Memory</button>
+                </div>
+            </div>
+            <div class="panel-content">
+                <textarea id="source" placeholder="// Enter your wasc code here
+// Example:
+export i32 main() {
+    return 42;
+}">export i32 main() {
+    return 42;
+}</textarea>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <div class="panel-header">
+                <span class="panel-title">Output</span>
+                <div class="panel-actions">
+                    <button id="compileBtn" onclick="compile()">Compile</button>
+                    <button class="secondary" onclick="downloadWasm()" id="downloadBtn" disabled>Download .wasm</button>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div id="output" class="output">
+                    <div class="loading">Click "Compile" to generate WebAssembly</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script type="module">
+        import init, { compile_wasm } from './wasc.js';
+        
+        let wasmModule = null;
+        let lastCompiledBytes = null;
+        
+        // Initialize WASM
+        async function initWasm() {
+            try {
+                await init();
+                wasmModule = { compile_wasm };
+                document.getElementById('output').innerHTML = '<span class="info">✓ WASC compiler loaded and ready</span>';
+            } catch (e) {
+                document.getElementById('output').innerHTML = `<span class="error">Error loading compiler: ${e.message}</span>`;
+                console.error(e);
+            }
+        }
+        
+        // Compile function
+        window.compile = async function() {
+            if (!wasmModule) {
+                document.getElementById('output').innerHTML = '<span class="error">Compiler not loaded yet</span>';
+                return;
+            }
+            
+            const source = document.getElementById('source').value;
+            const output = document.getElementById('output');
+            const downloadBtn = document.getElementById('downloadBtn');
+            
+            output.innerHTML = '<span class="info">Compiling...</span>';
+            downloadBtn.disabled = true;
+            
+            try {
+                const bytes = wasmModule.compile_wasm(source);
+                lastCompiledBytes = bytes;
+                
+                // Display success info
+                const size = bytes.length;
+                const hexPreview = Array.from(bytes.slice(0, 32))
+                    .map(b => b.toString(16).padStart(2, '0'))
+                    .join(' ');
+                
+                output.innerHTML = `<span class="success">✓ Compilation successful!</span>
+
+<span class="info">Size:</span> ${size} bytes
+<span class="info">Hex preview:</span> ${hexPreview}${size > 32 ? '...' : ''}
+
+<span class="info">You can download the .wasm file or run it in the browser.</span>`;
+                
+                downloadBtn.disabled = false;
+                
+                // Also log to console
+                console.log('Compiled WASM:', bytes);
+                
+            } catch (e) {
+                output.innerHTML = `<span class="error">✗ Compilation error:\n${e}</span>`;
+                console.error(e);
+                lastCompiledBytes = null;
+            }
+        };
+        
+        // Download WASM file
+        window.downloadWasm = function() {
+            if (!lastCompiledBytes) return;
+            
+            const blob = new Blob([lastCompiledBytes], { type: 'application/wasm' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'output.wasm';
+            a.click();
+            URL.revokeObjectURL(url);
+        };
+        
+        // Load examples
+        window.loadExample = function(name) {
+            const examples = {
+                simple: `export i32 main() {
+    return 42;
+}`,
+                refs: `// Test externref with console.log
+memory 1;
+
+extern void console_log(externref msg);
+
+export i32 test_refs() {
+    externref null_ref = ref.null externref;
+    
+    if (ref.is_null(null_ref)) {
+        return 1;
+    }
+    
+    return 0;
+}
+
+export i32 main() {
+    return test_refs();
+}`,
+                memory: `// Memory operations example
+memory 1;
+
+export i32 main() {
+    i32 x = 100;
+    i32 y = 200;
+    return x + y;
+}`
+            };
+            
+            document.getElementById('source').value = examples[name] || examples.simple;
+        };
+        
+        // Initialize
+        initWasm();
+    </script>
+</body>
+</html>

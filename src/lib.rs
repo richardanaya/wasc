@@ -36,6 +36,27 @@ pub fn compile(source: &str) -> Result<Vec<u8>, CompileError> {
     codegen.generate()
 }
 
+// WASM-bindgen wrapper for JavaScript usage
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn compile_wasm(source: &str) -> Result<JsValue, JsValue> {
+    match compile(source) {
+        Ok(bytes) => {
+            // Convert Vec<u8> to Uint8Array
+            let array = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
+            array.copy_from(&bytes);
+            Ok(array.into())
+        }
+        Err(e) => {
+            let msg = format!("{:?}", e);
+            Err(JsValue::from_str(&msg))
+        }
+    }
+}
+
 /// Compilation error types
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompileError {
