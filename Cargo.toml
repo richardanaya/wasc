@@ -1,0 +1,15 @@
+[package]
+name = "wasc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+webassembly = { git = "https://github.com/richardanaya/webassembly-rs.git" }
+
+[[bin]]
+name = "wasc"
+path = "src/bin/wasc.rs"
+
+[lib]
+name = "wasc"
+path = "src/lib.rs"
