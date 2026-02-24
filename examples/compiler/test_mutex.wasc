@@ -1,0 +1,24 @@
+// Thread synchronization example
+// Note: This requires running in a browser with SharedArrayBuffer enabled
+// and proper CORS headers (Cross-Origin-Opener-Policy and Cross-Origin-Embedder-Policy)
+memory shared 1;
+
+// Simple mutex implementation using atomic operations
+export void mutex_lock(i32 ptr) {
+    // Spinlock: keep trying until we acquire the lock
+    i32 expected = 0;
+    while (atomic.compare_exchange(ptr, expected, 1) != 0) {
+        // Wait for the lock to become available
+        thread.wait32(ptr, 1, -1);
+    }
+}
+
+export void mutex_unlock(i32 ptr) {
+    atomic.store(ptr, 0);
+    // Notify one waiter
+    thread.notify(ptr, 1);
+}
+
+export i32 main() {
+    return 0;
+}

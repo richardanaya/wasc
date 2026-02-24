@@ -1,0 +1,26 @@
+// Thread synchronization example
+// Note: This requires running in a browser with SharedArrayBuffer enabled
+// and proper CORS headers (Cross-Origin-Opener-Policy and Cross-Origin-Embedder-Policy)
+memory shared 1;
+
+// Test atomic operations with thread sync
+export i32 test_atomics() {
+    i32 ptr = 0;
+    
+    // Atomic increment
+    i32 old_val = atomic.add(ptr, 1);
+    
+    // Atomic decrement  
+    i32 new_val = atomic.sub(ptr, 1);
+    
+    return new_val;
+}
+
+// Simple counter using atomic add
+export i32 increment_counter(i32 ptr) {
+    return atomic.add(ptr, 1);
+}
+
+export i32 main() {
+    return test_atomics();
+}

@@ -146,6 +146,7 @@ enum Token {
     False,
     Shared,
     Atomic,
+    Thread,
 
     // Identifiers
     Identifier(String),
@@ -548,6 +549,7 @@ impl<'a> Lexer<'a> {
                         "false" => Token::False,
                         "shared" => Token::Shared,
                         "atomic" => Token::Atomic,
+                        "thread" => Token::Thread,
                         _ => Token::Identifier(ident),
                     }
                 }
@@ -778,6 +780,10 @@ enum Expression {
     AtomicLoad(Box<Expression>, ValType), // atomic.load(ptr, type)
     AtomicStore(Box<Expression>, Box<Expression>, ValType), // atomic.store(ptr, value, type)
     AtomicRmw(BinOp, Box<Expression>, Box<Expression>, ValType), // atomic.add(ptr, value, type), etc.
+
+    // Thread synchronization
+    MemoryNotify(Box<Expression>, Box<Expression>), // thread.notify(ptr, count)
+    MemoryWait(Box<Expression>, Box<Expression>, Box<Expression>, bool), // thread.wait32/64(ptr, expected, timeout)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1771,6 +1777,70 @@ impl<'a> Parser<'a> {
                     })
                 }
             }
+            Token::Thread => {
+                self.advance();
+                self.match_token(Token::Dot);
+                // thread.notify, thread.wait32, thread.wait64
+                if let Token::Identifier(op) = &self.current_token {
+                    let op_name = op.clone();
+                    self.advance();
+                    self.expect(Token::LParen)?;
+
+                    match op_name.as_str() {
+                        "notify" => {
+                            // thread.notify(ptr, count)
+                            let ptr = self.parse_expression()?;
+                            self.expect(Token::Comma)?;
+                            let count = self.parse_expression()?;
+                            self.expect(Token::RParen)?;
+                            Ok(Expression::MemoryNotify(Box::new(ptr), Box::new(count)))
+                        }
+                        "wait32" => {
+                            // thread.wait32(ptr, expected, timeout)
+                            let ptr = self.parse_expression()?;
+                            self.expect(Token::Comma)?;
+                            let expected = self.parse_expression()?;
+                            self.expect(Token::Comma)?;
+                            let timeout = self.parse_expression()?;
+                            self.expect(Token::RParen)?;
+                            Ok(Expression::MemoryWait(
+                                Box::new(ptr),
+                                Box::new(expected),
+                                Box::new(timeout),
+                                false, // 32-bit
+                            ))
+                        }
+                        "wait64" => {
+                            // thread.wait64(ptr, expected, timeout)
+                            let ptr = self.parse_expression()?;
+                            self.expect(Token::Comma)?;
+                            let expected = self.parse_expression()?;
+                            self.expect(Token::Comma)?;
+                            let timeout = self.parse_expression()?;
+                            self.expect(Token::RParen)?;
+                            Ok(Expression::MemoryWait(
+                                Box::new(ptr),
+                                Box::new(expected),
+                                Box::new(timeout),
+                                true, // 64-bit
+                            ))
+                        }
+                        _ => Err(CompileError::ParseError {
+                            line: 0,
+                            col: 0,
+                            message: format!("unknown thread operation: {}", op_name),
+                        }),
+                    }
+                } else {
+                    Err(CompileError::ParseError {
+                        line: 0,
+                        col: 0,
+                        message: String::from(
+                            "expected thread.notify, thread.wait32, or thread.wait64",
+                        ),
+                    })
+                }
+            }
             Token::LParen => {
                 self.advance();
                 let expr = self.parse_expression()?;
@@ -2488,6 +2558,25 @@ impl CodeGen {
                 instructions.push(inst);
                 Ok(())
             }
+            Expression::MemoryNotify(ptr, count) => {
+                self.generate_expression(instructions, ptr)?;
+                self.generate_expression(instructions, count)?;
+                instructions.push(Instruction::MemoryAtomicNotify(MemArg { align: 2, offset: 0 }));
+                Ok(())
+            }
+            Expression::MemoryWait(ptr, expected, timeout, is_64) => {
+                self.generate_expression(instructions, ptr)?;
+                self.generate_expression(instructions, expected)?;
+                self.generate_expression(instructions, timeout)?;
+                let memarg = MemArg { align: 2, offset: 0 };
+                let inst = if *is_64 {
+                    Instruction::MemoryAtomicWait64(memarg)
+                } else {
+                    Instruction::MemoryAtomicWait32(memarg)
+                };
+                instructions.push(inst);
+                Ok(())
+            }
         }
     }
 
@@ -2735,5 +2824,32 @@ export i32 main() {
         let bytes = result.unwrap();
         // Check that memory section has shared flag (look for memory section pattern)
         assert!(bytes.len() > 50, "Should have atomic instructions");
+    }
+
+    #[test]
+    fn test_thread_sync() {
+        let source = r#"
+memory shared 1;
+
+export i32 test_thread() {
+    i32 ptr = 0;
+    i32 count = 1;
+    // thread operations return values that indicate success
+    i32 woken = thread.notify(ptr, count);
+    return woken;
+}
+
+export i32 main() {
+    return test_thread();
+}
+"#;
+        let result = compile(source);
+        assert!(
+            result.is_ok(),
+            "Thread sync test failed: {:?}",
+            result.err()
+        );
+        let bytes = result.unwrap();
+        assert!(bytes.len() > 50, "Should have thread instructions");
     }
 }
