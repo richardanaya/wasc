@@ -134,6 +134,26 @@ table[0] = &my_callback;
 funcref callback = table[0];
 ```
 
+### Atomic Operations (Threads)
+```wasc
+memory shared 1;  // Shared memory for threads
+
+export i32 test_atomic() {
+    i32 ptr = 0;
+    
+    atomic.store(ptr, 100);        // Atomic store
+    i32 val = atomic.load(ptr);     // Atomic load
+    i32 old = atomic.add(ptr, 50);  // Atomic add, returns old value
+    i32 result = atomic.sub(ptr, 25);  // Atomic subtract
+    
+    // Also supported: atomic.and, atomic.or, atomic.xor
+    atomic.and(ptr, 0xFF);
+    atomic.or(ptr, 0x100);
+    
+    return result;
+}
+```
+
 ### Memory Operations
 ```wasc
 memory 1;
