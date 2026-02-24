@@ -7,6 +7,7 @@ A C-like language compiler specifically designed for WebAssembly with first-clas
 - **C-like syntax** - Familiar to C programmers
 - **First-class externref and funcref types** - Easy interop with JavaScript
 - **Direct memory and table management** - Explicit control over WASM resources
+- **Atomic operations and thread synchronization** - Multi-threading support
 - **Zero-overhead external function calls** - Import and call JS functions directly
 - **No standard library** - You control everything, no hidden overhead
 - **Single-file implementation** - The entire compiler is in one Rust file
@@ -151,6 +152,25 @@ export i32 test_atomic() {
     atomic.or(ptr, 0x100);
     
     return result;
+}
+```
+
+### Thread Synchronization
+```wasc
+memory shared 1;  // Required for thread operations
+
+export i32 test_thread_sync() {
+    i32 ptr = 0;
+    i32 expected = 0;
+    i64 timeout = -1;  // Infinite wait
+    
+    // Wait for another thread to notify us
+    i32 result = thread.wait32(ptr, expected, timeout);
+    
+    // Notify waiting threads
+    i32 woken = thread.notify(ptr, 1);
+    
+    return woken;
 }
 ```
 
