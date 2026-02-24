@@ -53,10 +53,10 @@ pub fn compile(source: &str) -> Result<Vec<u8>, CompileError> {
 }
 
 // WASM-bindgen wrapper for JavaScript usage
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn compile_wasm(source: &str) -> Result<JsValue, JsValue> {
     match compile(source) {
