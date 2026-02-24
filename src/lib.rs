@@ -706,6 +706,8 @@ enum Statement {
     Block(Vec<Statement>),
     // Table assignment: table[index] = value;
     TableSet(Expression, Expression),
+    // Memory store: *ptr = value;
+    MemoryStore(Expression, Expression),
 }
 
 #[derive(Debug, Clone)]
@@ -1237,19 +1239,29 @@ impl<'a> Parser<'a> {
                     }
                 }
 
-                // Assignment: var = expr;
+                // Assignment: var = expr; or *ptr = expr;
                 if self.current_token == Token::Assign {
-                    if let Expression::Variable(name) = expr {
-                        self.advance();
-                        let value = self.parse_expression()?;
-                        self.match_token(Token::Semicolon);
-                        return Ok(Statement::Assign(name, value));
-                    } else {
-                        return Err(CompileError::ParseError {
-                            line: 0,
-                            col: 0,
-                            message: String::from("invalid assignment target"),
-                        });
+                    match expr {
+                        Expression::Variable(name) => {
+                            self.advance();
+                            let value = self.parse_expression()?;
+                            self.match_token(Token::Semicolon);
+                            return Ok(Statement::Assign(name, value));
+                        }
+                        Expression::Deref(ptr_expr) => {
+                            // Memory store: *ptr = value;
+                            self.advance();
+                            let value = self.parse_expression()?;
+                            self.match_token(Token::Semicolon);
+                            return Ok(Statement::MemoryStore(*ptr_expr, value));
+                        }
+                        _ => {
+                            return Err(CompileError::ParseError {
+                                line: 0,
+                                col: 0,
+                                message: String::from("invalid assignment target"),
+                            });
+                        }
                     }
                 }
 
@@ -2137,6 +2149,16 @@ impl CodeGen {
                 instructions.push(Instruction::TableSet(0)); // Table index 0
                 Ok(())
             }
+            Statement::MemoryStore(ptr_expr, value) => {
+                // Store value at memory address: compute address, then value, then store
+                self.generate_expression(instructions, ptr_expr)?;
+                self.generate_expression(instructions, value)?;
+                instructions.push(Instruction::I32Store(MemArg {
+                    align: 2, // 4-byte alignment
+                    offset: 0,
+                }));
+                Ok(())
+            }
         }
     }
 
@@ -2299,11 +2321,18 @@ impl CodeGen {
                 // TODO: Implement proper ref.cast when needed
                 Ok(())
             }
-            Expression::Deref(_) => Err(CompileError::CodeGenError {
-                message: String::from("pointer dereference not yet implemented"),
-            }),
+            Expression::Deref(expr) => {
+                // Load from memory: generate address expression, then load
+                self.generate_expression(instructions, expr)?;
+                // i32.load with default alignment and offset
+                instructions.push(Instruction::I32Load(MemArg {
+                    align: 2,  // 4-byte alignment (2^2)
+                    offset: 0,
+                }));
+                Ok(())
+            }
             Expression::AddressOf(_) => Err(CompileError::CodeGenError {
-                message: String::from("address-of operator not yet implemented"),
+                message: String::from("address-of operator for variables not supported (use memory pointers with i32)"),
             }),
         }
     }

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WASM Console Log Test</title>
+</head>
+<body>
+    <h1>WASM Console Log Test with Externref</h1>
+    <div id="result">Loading...</div>
+    <div id="log-output"></div>
+    <button onclick="testLog()">Test Console Log</button>
+    
+    <script>
+        let wasmInstance = null;
+        
+        async function loadWasm() {
+            const outputDiv = document.getElementById('log-output');
+            
+            function customLog(msg) {
+                const line = document.createElement('div');
+                line.textContent = '[WASM Log] ' + msg;
+                line.style.color = 'blue';
+                outputDiv.appendChild(line);
+                console.log('[WASM]', msg);
+            }
+            
+            try {
+                const response = await fetch('test_console.wasm');
+                const bytes = await response.arrayBuffer();
+                const module = await WebAssembly.compile(bytes);
+                
+                console.log('WASM compiled');
+                console.log('Imports:', WebAssembly.Module.imports(module));
+                console.log('Exports:', WebAssembly.Module.exports(module));
+                
+                wasmInstance = await WebAssembly.instantiate(module, {
+                    env: {
+                        memory: new WebAssembly.Memory({ initial: 1 }),
+                        console_log: customLog
+                    }
+                });
+                
+                // Test main
+                const result = wasmInstance.exports.main();
+                document.getElementById('result').textContent = 
+                    'SUCCESS: WASM loaded, main() returned ' + result;
+                
+            } catch (e) {
+                document.getElementById('result').textContent = 'ERROR: ' + e.message;
+                console.error(e);
+            }
+        }
+        
+        function testLog() {
+            if (!wasmInstance) {
+                alert('WASM not loaded yet');
+                return;
+            }
+            
+            // Create a JS object/string and pass it to WASM
+            const message = 'Hello from JavaScript! Time: ' + new Date().toLocaleTimeString();
+            wasmInstance.exports.log_message(message);
+        }
+        
+        loadWasm();
+    </script>
+</body>
+</html>

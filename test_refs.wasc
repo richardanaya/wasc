@@ -1,0 +1,27 @@
+// Test externref with console.log
+memory 1;
+
+// Import JS console.log that takes an externref
+extern void console_log(externref msg);
+
+// Helper to test references
+export i32 test_refs() {
+    // Create null externref
+    externref null_ref = ref.null externref;
+    
+    // Check if null
+    if (ref.is_null(null_ref)) {
+        return 1;
+    }
+    
+    return 0;
+}
+
+// Main function that calls console.log with a string reference
+export i32 main() {
+    i32 result = test_refs();
+    
+    // Log the result (as i32 converted to externref would need JS wrapper)
+    // For now just return the result
+    return result;
+}

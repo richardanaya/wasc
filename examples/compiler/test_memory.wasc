@@ -1,0 +1,16 @@
+// Test memory operations
+memory 1;
+
+export i32 test_store_load() {
+    // Store value at memory offset 0
+    i32 ptr = 0;
+    *ptr = 123;  // Store 123 at address 0
+    
+    // Load it back
+    i32 loaded = *ptr;
+    return loaded;
+}
+
+export i32 main() {
+    return test_store_load();
+}

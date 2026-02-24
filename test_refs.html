@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WASM Refs Test - Console Log</title>
+</head>
+<body>
+    <h1>WASM References Test</h1>
+    <div id="result">Loading...</div>
+    <div id="console-output"></div>
+    <script>
+        async function loadWasm() {
+            const outputDiv = document.getElementById('console-output');
+            
+            // Custom console.log that takes externref
+            function customLog(msg) {
+                const line = document.createElement('div');
+                line.textContent = 'Console: ' + msg;
+                outputDiv.appendChild(line);
+                console.log('WASM says:', msg);
+            }
+            
+            try {
+                const response = await fetch('test_refs.wasm');
+                const bytes = await response.arrayBuffer();
+                const module = await WebAssembly.compile(bytes);
+                
+                console.log('Exports:', WebAssembly.Module.exports(module));
+                console.log('Imports:', WebAssembly.Module.imports(module));
+                
+                const instance = await WebAssembly.instantiate(module, {
+                    env: {
+                        memory: new WebAssembly.Memory({ initial: 1 }),
+                        console_log: customLog
+                    }
+                });
+                
+                // Test test_refs
+                const result = instance.exports.test_refs();
+                document.getElementById('result').textContent = 
+                    'SUCCESS: test_refs() returned ' + result + ' (expected 1 for null ref check)';
+                
+                // Test main
+                const mainResult = instance.exports.main();
+                const mainLine = document.createElement('div');
+                mainLine.textContent = 'main() returned: ' + mainResult;
+                outputDiv.appendChild(mainLine);
+                
+            } catch (e) {
+                document.getElementById('result').textContent = 'ERROR: ' + e.message;
+                console.error(e);
+            }
+        }
+        loadWasm();
+    </script>
+</body>
+</html>
