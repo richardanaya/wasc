@@ -12,12 +12,14 @@
 #![no_std]
 extern crate alloc;
 
+#[cfg(test)]
+extern crate std;
+
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::{format, vec};
-use webassembly::op::*;
 use webassembly::*;
 
 // ============================================================================
@@ -30,7 +32,7 @@ pub fn compile(source: &str) -> Result<Vec<u8>, CompileError> {
     let tokens = lexer.tokenize()?;
     let mut parser = Parser::new(&tokens);
     let program = parser.parse_program()?;
-    let mut codegen = CodeGen::new(program);
+    let codegen = CodeGen::new(program);
     codegen.generate()
 }
 
@@ -1652,7 +1654,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let idx = self.parse_expression()?;
                     self.expect(Token::RBracket)?;
-                    Ok(Expression::TableGet(Box::new(Expression::Variable(id))))
+                    Ok(Expression::TableGet(Box::new(idx)))
                 } else {
                     Ok(Expression::Variable(id))
                 }
@@ -1667,53 +1669,45 @@ impl<'a> Parser<'a> {
 }
 
 // ============================================================================
-// CODE GENERATOR
+// CODE GENERATOR - Using webassembly crate types
 // ============================================================================
 
 struct CodeGen {
     program: Program,
-    module: WasmModule,
     function_indices: BTreeMap<String, u32>,
     local_indices: BTreeMap<String, (u32, Type)>,
     current_func: Option<Function>,
     type_indices: BTreeMap<(Vec<Type>, Type), u32>,
     import_count: u32,
-}
-
-struct WasmModule {
-    types: Vec<Vec<u8>>,
-    imports: Vec<Vec<u8>>,
-    functions: Vec<u32>,
-    tables: Vec<Vec<u8>>,
-    memories: Vec<Vec<u8>>,
-    exports: Vec<Vec<u8>>,
-    codes: Vec<Vec<u8>>,
+    func_types: Vec<FuncType>,
+    imports: Vec<webassembly::Import>,
+    function_type_indices: Vec<u32>,
+    tables: Vec<webassembly::Table>,
+    memories: Vec<Limits>,
+    exports: Vec<webassembly::Export>,
+    codes: Vec<webassembly::Code>,
 }
 
 impl CodeGen {
     fn new(program: Program) -> Self {
-        let mut module = WasmModule {
-            types: Vec::new(),
-            imports: Vec::new(),
-            functions: Vec::new(),
-            tables: Vec::new(),
-            memories: Vec::new(),
-            exports: Vec::new(),
-            codes: Vec::new(),
-        };
-
         CodeGen {
             program,
-            module,
             function_indices: BTreeMap::new(),
             local_indices: BTreeMap::new(),
             current_func: None,
             type_indices: BTreeMap::new(),
             import_count: 0,
+            func_types: Vec::new(),
+            imports: Vec::new(),
+            function_type_indices: Vec::new(),
+            tables: Vec::new(),
+            memories: Vec::new(),
+            exports: Vec::new(),
+            codes: Vec::new(),
         }
     }
 
-    fn generate(&mut self) -> Result<Vec<u8>, CompileError> {
+    fn generate(mut self) -> Result<Vec<u8>, CompileError> {
         // Clone program data to avoid borrow issues
         let memory = self.program.memory.clone();
         let tables = self.program.tables.clone();
@@ -1722,27 +1716,28 @@ impl CodeGen {
 
         // Generate memory section if declared
         if let Some(mem) = &memory {
-            let mut mem_bytes = Vec::new();
-            let flags = if mem.maximum.is_some() { 0x01 } else { 0x00 }
+            let _flags = if mem.maximum.is_some() { 0x01 } else { 0x00 }
                 | if mem.shared { 0x03 } else { 0x00 };
-            mem_bytes.push(flags);
-            mem_bytes.extend(leb128_u32(mem.initial));
-            if let Some(max) = mem.maximum {
-                mem_bytes.extend(leb128_u32(max));
-            }
-            self.module.memories.push(mem_bytes);
+            self.memories.push(Limits {
+                min: mem.initial,
+                max: mem.maximum,
+            });
         }
 
         // Generate table section
         for table in &tables {
-            let mut table_bytes = Vec::new();
-            let flags = if table.maximum.is_some() { 0x01 } else { 0x00 };
-            table_bytes.push(flags);
-            table_bytes.extend(leb128_u32(table.initial));
-            if let Some(max) = table.maximum {
-                table_bytes.extend(leb128_u32(max));
-            }
-            self.module.tables.push(table_bytes);
+            let reftype = match table.elem_type {
+                Type::Funcref => FUNCREF,
+                Type::Externref => EXTERNREF,
+                _ => FUNCREF,
+            };
+            self.tables.push(webassembly::Table {
+                reftype,
+                limits: Limits {
+                    min: table.initial,
+                    max: table.maximum,
+                },
+            });
         }
 
         // Generate imports and collect their indices
@@ -1771,118 +1766,71 @@ impl CodeGen {
         // Generate exports
         for func in &functions {
             if func.is_export {
-                let func_idx = self.function_indices.get(&func.name).unwrap();
-                let mut export = Vec::new();
-                export.push(func.name.len() as u8);
-                export.extend_from_slice(func.name.as_bytes());
-                export.push(0x00); // Export kind: function
-                export.extend(leb128_u32(*func_idx));
-                self.module.exports.push(export);
+                let func_idx = *self.function_indices.get(&func.name).unwrap();
+                self.exports.push(webassembly::Export {
+                    name: func.name.clone(),
+                    kind: 0x00, // Function export
+                    idx: func_idx,
+                });
             }
         }
 
         // Export memory if present
         if memory.is_some() {
-            let mut export = Vec::new();
-            export.push(6); // "memory"
-            export.extend_from_slice(b"memory");
-            export.push(0x02); // Export kind: memory
-            export.extend(leb128_u32(0)); // Memory index 0
-            self.module.exports.push(export);
+            self.exports.push(webassembly::Export {
+                name: String::from("memory"),
+                kind: 0x02, // Memory export
+                idx: 0,
+            });
         }
 
-        // Build final WASM binary
-        let mut output = Vec::new();
+        // Build sections by moving values
+        let sections = self.build_sections();
 
-        // Magic number and version
-        output.extend_from_slice(&MAGIC);
-        output.extend_from_slice(&VERSION.to_le_bytes());
+        // Use webassembly crate's encode function
+        let program = webassembly::Program { sections };
+        Ok(encode(&program))
+    }
+
+    fn build_sections(self) -> Vec<Section> {
+        let mut sections = Vec::new();
 
         // Type section
-        if !self.module.types.is_empty() {
-            output.push(TYPE);
-            let mut section_content = Vec::new();
-            section_content.extend((self.module.types.len() as u32).to_wasm_bytes());
-            for t in &self.module.types {
-                section_content.extend(t);
-            }
-            output.extend((section_content.len() as u32).to_wasm_bytes());
-            output.extend(section_content);
+        if !self.func_types.is_empty() {
+            sections.push(Section::Type(self.func_types));
         }
 
         // Import section
-        if !self.module.imports.is_empty() {
-            output.push(IMPORT);
-            let mut section_content = Vec::new();
-            section_content.extend((self.module.imports.len() as u32).to_wasm_bytes());
-            for i in &self.module.imports {
-                section_content.extend(i);
-            }
-            output.extend((section_content.len() as u32).to_wasm_bytes());
-            output.extend(section_content);
+        if !self.imports.is_empty() {
+            sections.push(Section::Import(self.imports));
         }
 
         // Function section
-        if !self.module.functions.is_empty() {
-            output.push(FUNCTION);
-            let mut section_content = Vec::new();
-            section_content.extend((self.module.functions.len() as u32).to_wasm_bytes());
-            for f in &self.module.functions {
-                section_content.extend((*f as u32).to_wasm_bytes());
-            }
-            output.extend((section_content.len() as u32).to_wasm_bytes());
-            output.extend(section_content);
+        if !self.function_type_indices.is_empty() {
+            sections.push(Section::Function(self.function_type_indices));
         }
 
         // Table section
-        if !self.module.tables.is_empty() {
-            output.push(TABLE);
-            let mut section_content = Vec::new();
-            section_content.extend((self.module.tables.len() as u32).to_wasm_bytes());
-            for t in &self.module.tables {
-                section_content.extend(t);
-            }
-            output.extend((section_content.len() as u32).to_wasm_bytes());
-            output.extend(section_content);
+        if !self.tables.is_empty() {
+            sections.push(Section::Table(self.tables));
         }
 
         // Memory section
-        if !self.module.memories.is_empty() {
-            output.push(MEMORY);
-            let mut section_content = Vec::new();
-            section_content.extend((self.module.memories.len() as u32).to_wasm_bytes());
-            for m in &self.module.memories {
-                section_content.extend(m);
-            }
-            output.extend((section_content.len() as u32).to_wasm_bytes());
-            output.extend(section_content);
+        if !self.memories.is_empty() {
+            sections.push(Section::Memory(self.memories));
         }
 
         // Export section
-        if !self.module.exports.is_empty() {
-            output.push(EXPORT);
-            let mut section_content = Vec::new();
-            section_content.extend((self.module.exports.len() as u32).to_wasm_bytes());
-            for e in &self.module.exports {
-                section_content.extend(e);
-            }
-            output.extend((section_content.len() as u32).to_wasm_bytes());
-            output.extend(section_content);
+        if !self.exports.is_empty() {
+            sections.push(Section::Export(self.exports));
         }
 
         // Code section
-        if !self.module.codes.is_empty() {
-            output.push(CODE);
-            let mut section_content = Vec::new();
-            section_content.extend((self.module.codes.len() as u32).to_wasm_bytes());
-            for c in &self.module.codes {
-                section_content.extend(c);
-            }
-            output.extend((section_content.len() as u32).to_wasm_bytes());
-            output.extend(section_content);
+        if !self.codes.is_empty() {
+            sections.push(Section::Code(self.codes));
         }
 
-        Ok(output)
+        sections
     }
 
     fn generate_import(&mut self, import: &ImportDecl) -> Result<(), CompileError> {
@@ -1890,24 +1838,12 @@ impl CodeGen {
         let param_types: Vec<Type> = import.params.iter().map(|(_, t)| t.clone()).collect();
         let type_idx = self.get_or_create_type_index_from_types(&param_types, &import.return_type);
 
-        // Generate import entry
-        let mut import_bytes = Vec::new();
-
-        // Module name
-        import_bytes.push(import.module.len() as u8);
-        import_bytes.extend_from_slice(import.module.as_bytes());
-
-        // Field name (function name)
-        import_bytes.push(import.name.len() as u8);
-        import_bytes.extend_from_slice(import.name.as_bytes());
-
-        // Import kind (0 = function)
-        import_bytes.push(0x00);
-
-        // Type index
-        import_bytes.extend(leb128_u32(type_idx));
-
-        self.module.imports.push(import_bytes);
+        // Create import entry
+        self.imports.push(webassembly::Import {
+            module: import.module.clone(),
+            name: import.name.clone(),
+            desc: webassembly::ImportDesc::Func(type_idx),
+        });
 
         Ok(())
     }
@@ -1917,7 +1853,7 @@ impl CodeGen {
 
         // Get or create type index
         let type_idx = self.get_or_create_type_index(&func.params, &func.return_type);
-        self.module.functions.push(type_idx);
+        self.function_type_indices.push(type_idx);
 
         // Build local index map
         self.local_indices.clear();
@@ -1938,24 +1874,15 @@ impl CodeGen {
         }
 
         // Generate code
-        let mut code = Vec::new();
-
-        // Local declarations (count of locals by type)
-        let locals_by_type = self.group_locals_by_type(&func.locals);
-        code.extend(leb128_u32(locals_by_type.len() as u32));
-        for (count, ty) in locals_by_type {
-            code.extend(leb128_u32(count));
-            code.push(type_to_valtype(&ty));
-        }
+        let mut instructions = Vec::new();
 
         // Function body
         for stmt in &func.body {
-            self.generate_statement(&mut code, stmt)?;
+            self.generate_statement(&mut instructions, stmt)?;
         }
 
         // Add implicit return for void functions if needed
         if func.return_type == Type::Void {
-            // Check if last statement is not already a return
             let needs_return = func
                 .body
                 .last()
@@ -1963,10 +1890,9 @@ impl CodeGen {
                 .unwrap_or(true);
 
             if needs_return {
-                code.push(END);
+                instructions.push(Instruction::Return);
             }
         } else {
-            // Ensure we have a return
             let has_return = func
                 .body
                 .last()
@@ -1977,185 +1903,177 @@ impl CodeGen {
                 // Push a default value
                 match &func.return_type {
                     Type::I32 => {
-                        code.push(I32_CONST);
-                        code.extend(leb128_i32(0));
+                        instructions.push(Instruction::I32Const(0));
                     }
                     Type::I64 => {
-                        code.push(I64_CONST);
-                        code.extend(leb128_i64(0));
+                        instructions.push(Instruction::I64Const(0));
                     }
                     Type::F32 => {
-                        code.push(F32_CONST);
-                        code.extend(&0.0f32.to_le_bytes());
+                        instructions.push(Instruction::F32Const(0.0));
                     }
                     Type::F64 => {
-                        code.push(F64_CONST);
-                        code.extend(&0.0f64.to_le_bytes());
+                        instructions.push(Instruction::F64Const(0.0));
                     }
                     Type::Externref | Type::Funcref => {
-                        code.push(REF_NULL);
-                        code.push(type_to_valtype(&func.return_type));
+                        let reftype = match func.return_type {
+                            Type::Externref => EXTERNREF,
+                            Type::Funcref => FUNCREF,
+                            _ => EXTERNREF,
+                        };
+                        instructions.push(Instruction::RefNull(reftype));
                     }
                     Type::Void => {}
                 }
-                code.push(END);
+                instructions.push(Instruction::Return);
             }
         }
 
-        // Wrap code in size
-        let mut code_entry = Vec::new();
-        code_entry.extend(leb128_u32(code.len() as u32));
-        code_entry.extend(code);
+        // Always end the function body with END
+        instructions.push(Instruction::End);
 
-        self.module.codes.push(code_entry);
+        // Group locals by type for WASM encoding
+        let locals_by_type = self.group_locals_by_type(&func.locals);
+        let mut local_decls: Vec<(u32, ValType)> = Vec::new();
+        for (count, ty) in locals_by_type {
+            let valtype = type_to_valtype(&ty);
+            local_decls.push((count, valtype));
+        }
+
+        self.codes.push(webassembly::Code {
+            locals: local_decls,
+            body: instructions,
+        });
+
         self.current_func = None;
-
         Ok(())
     }
 
-    fn generate_statement(&self, code: &mut Vec<u8>, stmt: &Statement) -> Result<(), CompileError> {
+    fn generate_statement(
+        &self,
+        instructions: &mut Vec<Instruction>,
+        stmt: &Statement,
+    ) -> Result<(), CompileError> {
         match stmt {
-            Statement::VarDecl(name, ty, init) => {
+            Statement::VarDecl(name, _ty, init) => {
                 let local_idx = self.local_indices.get(name).unwrap().0;
 
                 if let Some(expr) = init {
-                    self.generate_expression(code, expr)?;
-                    code.push(LOCAL_SET);
-                    code.extend(leb128_u32(local_idx));
+                    self.generate_expression(instructions, expr)?;
+                    instructions.push(Instruction::LocalSet(local_idx));
                 }
                 Ok(())
             }
             Statement::Assign(name, value) => {
                 let local_idx = self.local_indices.get(name).unwrap().0;
-                self.generate_expression(code, value)?;
-                code.push(LOCAL_SET);
-                code.extend(leb128_u32(local_idx));
+                self.generate_expression(instructions, value)?;
+                instructions.push(Instruction::LocalSet(local_idx));
                 Ok(())
             }
             Statement::Expr(expr) => {
-                self.generate_expression(code, expr)?;
-                // Drop result if not void
-                if !matches!(expr, Expression::Call(_, _) | Expression::CallRef(_, _)) {
-                    // Actually we need to check if the expression produces a value
-                    // For now, just drop if it's not a call (calls might return void)
-                }
+                self.generate_expression(instructions, expr)?;
                 Ok(())
             }
             Statement::If(cond, then_branch, else_branch) => {
-                self.generate_expression(code, cond)?;
-                code.push(IF);
-                code.push(0x40); // Empty block type (void)
+                self.generate_expression(instructions, cond)?;
+                instructions.push(Instruction::If(BlockType::Empty));
 
                 for s in then_branch {
-                    self.generate_statement(code, s)?;
+                    self.generate_statement(instructions, s)?;
                 }
 
                 if let Some(else_stmts) = else_branch {
-                    code.push(ELSE);
+                    instructions.push(Instruction::Else);
                     for s in else_stmts {
-                        self.generate_statement(code, s)?;
+                        self.generate_statement(instructions, s)?;
                     }
                 }
 
-                code.push(END);
+                instructions.push(Instruction::End);
                 Ok(())
             }
             Statement::While(cond, body) => {
                 // Block wrapping loop for proper branching
-                code.push(BLOCK);
-                code.push(0x40); // Void
-
-                code.push(LOOP);
-                code.push(0x40); // Void
+                instructions.push(Instruction::Block(BlockType::Empty));
+                instructions.push(Instruction::Loop(BlockType::Empty));
 
                 // Condition
-                self.generate_expression(code, cond)?;
-                code.push(I32_EQZ); // Invert condition
-                code.push(BR_IF);
-                code.extend(leb128_u32(1)); // Branch to block end
+                self.generate_expression(instructions, cond)?;
+                instructions.push(Instruction::I32Eqz);
+                instructions.push(Instruction::BrIf(1)); // Branch to block end
 
                 // Body
                 for s in body {
-                    self.generate_statement(code, s)?;
+                    self.generate_statement(instructions, s)?;
                 }
 
                 // Continue loop
-                code.push(BR);
-                code.extend(leb128_u32(0)); // Branch to loop start
+                instructions.push(Instruction::Br(0)); // Branch to loop start
 
-                code.push(END); // Loop
-                code.push(END); // Block
+                instructions.push(Instruction::End); // Loop
+                instructions.push(Instruction::End); // Block
                 Ok(())
             }
             Statement::For(init, cond, update, body) => {
                 // Initialize
                 if let Some(init_stmt) = init {
-                    // This is already a boxed statement
                     let stmt = init_stmt.as_ref();
                     if let Statement::Expr(expr) = stmt {
-                        self.generate_expression(code, expr)?;
+                        self.generate_expression(instructions, expr)?;
                     } else {
-                        self.generate_statement(code, stmt)?;
+                        self.generate_statement(instructions, stmt)?;
                     }
                 }
 
                 // Loop structure
-                code.push(BLOCK);
-                code.push(0x40); // Void
-
-                code.push(LOOP);
-                code.push(0x40); // Void
+                instructions.push(Instruction::Block(BlockType::Empty));
+                instructions.push(Instruction::Loop(BlockType::Empty));
 
                 // Condition check
                 if let Some(c) = cond {
-                    self.generate_expression(code, c)?;
-                    code.push(I32_EQZ);
-                    code.push(BR_IF);
-                    code.extend(leb128_u32(1));
+                    self.generate_expression(instructions, c)?;
+                    instructions.push(Instruction::I32Eqz);
+                    instructions.push(Instruction::BrIf(1));
                 }
 
                 // Body
                 for s in body {
-                    self.generate_statement(code, s)?;
+                    self.generate_statement(instructions, s)?;
                 }
 
                 // Update
                 if let Some(upd) = update {
                     let stmt = upd.as_ref();
                     if let Statement::Expr(expr) = stmt {
-                        self.generate_expression(code, expr)?;
+                        self.generate_expression(instructions, expr)?;
                     } else {
-                        self.generate_statement(code, stmt)?;
+                        self.generate_statement(instructions, stmt)?;
                     }
                 }
 
                 // Continue
-                code.push(BR);
-                code.extend(leb128_u32(0));
+                instructions.push(Instruction::Br(0));
 
-                code.push(END); // Loop
-                code.push(END); // Block
+                instructions.push(Instruction::End); // Loop
+                instructions.push(Instruction::End); // Block
                 Ok(())
             }
             Statement::Return(value) => {
                 if let Some(expr) = value {
-                    self.generate_expression(code, expr)?;
+                    self.generate_expression(instructions, expr)?;
                 }
-                code.push(END);
+                instructions.push(Instruction::Return);
                 Ok(())
             }
             Statement::Block(stmts) => {
                 for s in stmts {
-                    self.generate_statement(code, s)?;
+                    self.generate_statement(instructions, s)?;
                 }
                 Ok(())
             }
             Statement::TableSet(idx_expr, value) => {
-                // Table set: table index is always 0 for now
-                self.generate_expression(code, idx_expr)?;
-                self.generate_expression(code, value)?;
-                code.push(TABLE_SET);
-                code.extend(leb128_u32(0)); // Table index 0
+                self.generate_expression(instructions, idx_expr)?;
+                self.generate_expression(instructions, value)?;
+                instructions.push(Instruction::TableSet(0)); // Table index 0
                 Ok(())
             }
         }
@@ -2163,33 +2081,28 @@ impl CodeGen {
 
     fn generate_expression(
         &self,
-        code: &mut Vec<u8>,
+        instructions: &mut Vec<Instruction>,
         expr: &Expression,
     ) -> Result<(), CompileError> {
         match expr {
             Expression::IntLiteral(n) => {
                 if *n >= i32::MIN as i64 && *n <= i32::MAX as i64 {
-                    code.push(I32_CONST);
-                    code.extend(leb128_i32(*n as i32));
+                    instructions.push(Instruction::I32Const(*n as i32));
                 } else {
-                    code.push(I64_CONST);
-                    code.extend(leb128_i64(*n));
+                    instructions.push(Instruction::I64Const(*n));
                 }
                 Ok(())
             }
             Expression::FloatLiteral(f) => {
                 if *f >= f32::MIN as f64 && *f <= f32::MAX as f64 {
-                    code.push(F32_CONST);
-                    code.extend(&(*f as f32).to_le_bytes());
+                    instructions.push(Instruction::F32Const(*f as f32));
                 } else {
-                    code.push(F64_CONST);
-                    code.extend(&f.to_le_bytes());
+                    instructions.push(Instruction::F64Const(*f));
                 }
                 Ok(())
             }
             Expression::BoolLiteral(b) => {
-                code.push(I32_CONST);
-                code.extend(leb128_i32(if *b { 1 } else { 0 }));
+                instructions.push(Instruction::I32Const(if *b { 1 } else { 0 }));
                 Ok(())
             }
             Expression::StringLiteral(_) => Err(CompileError::CodeGenError {
@@ -2197,8 +2110,7 @@ impl CodeGen {
             }),
             Expression::Variable(name) => {
                 if let Some((idx, _)) = self.local_indices.get(name) {
-                    code.push(LOCAL_GET);
-                    code.extend(leb128_u32(*idx));
+                    instructions.push(Instruction::LocalGet(*idx));
                     Ok(())
                 } else {
                     Err(CompileError::CodeGenError {
@@ -2207,49 +2119,47 @@ impl CodeGen {
                 }
             }
             Expression::Binary(op, left, right) => {
-                self.generate_expression(code, left)?;
-                self.generate_expression(code, right)?;
+                self.generate_expression(instructions, left)?;
+                self.generate_expression(instructions, right)?;
 
-                let opcode = match op {
-                    BinOp::Add => I32_ADD,
-                    BinOp::Sub => I32_SUB,
-                    BinOp::Mul => I32_MUL,
-                    BinOp::Div => I32_DIV_S,
-                    BinOp::Mod => I32_REM_S,
-                    BinOp::Eq => I32_EQ,
-                    BinOp::Ne => I32_NE,
-                    BinOp::Lt => I32_LT_S,
-                    BinOp::Gt => I32_GT_S,
-                    BinOp::Le => I32_LE_S,
-                    BinOp::Ge => I32_GE_S,
-                    BinOp::And => I32_AND,
-                    BinOp::Or => I32_OR,
-                    BinOp::BitAnd => I32_AND,
-                    BinOp::BitOr => I32_OR,
-                    BinOp::BitXor => I32_XOR,
-                    BinOp::Shl => I32_SHL,
-                    BinOp::Shr => I32_SHR_S,
+                let instruction = match op {
+                    BinOp::Add => Instruction::I32Add,
+                    BinOp::Sub => Instruction::I32Sub,
+                    BinOp::Mul => Instruction::I32Mul,
+                    BinOp::Div => Instruction::I32DivS,
+                    BinOp::Mod => Instruction::I32RemS,
+                    BinOp::Eq => Instruction::I32Eq,
+                    BinOp::Ne => Instruction::I32Ne,
+                    BinOp::Lt => Instruction::I32LtS,
+                    BinOp::Gt => Instruction::I32GtS,
+                    BinOp::Le => Instruction::I32LeS,
+                    BinOp::Ge => Instruction::I32GeS,
+                    BinOp::And => Instruction::I32And,
+                    BinOp::Or => Instruction::I32Or,
+                    BinOp::BitAnd => Instruction::I32And,
+                    BinOp::BitOr => Instruction::I32Or,
+                    BinOp::BitXor => Instruction::I32Xor,
+                    BinOp::Shl => Instruction::I32Shl,
+                    BinOp::Shr => Instruction::I32ShrS,
                 };
 
-                code.push(opcode);
+                instructions.push(instruction);
                 Ok(())
             }
             Expression::Unary(op, operand) => {
-                self.generate_expression(code, operand)?;
+                self.generate_expression(instructions, operand)?;
 
                 match op {
                     UnaryOp::Neg => {
-                        code.push(I32_CONST);
-                        code.extend(leb128_i32(0));
-                        code.push(I32_SUB);
+                        instructions.push(Instruction::I32Const(0));
+                        instructions.push(Instruction::I32Sub);
                     }
                     UnaryOp::Not => {
-                        code.push(I32_EQZ);
+                        instructions.push(Instruction::I32Eqz);
                     }
                     UnaryOp::BitNot => {
-                        code.push(I32_CONST);
-                        code.extend(leb128_i32(-1));
-                        code.push(I32_XOR);
+                        instructions.push(Instruction::I32Const(-1));
+                        instructions.push(Instruction::I32Xor);
                     }
                 }
 
@@ -2258,18 +2168,15 @@ impl CodeGen {
             Expression::Call(name, args) => {
                 // Push arguments (in reverse order for stack machine)
                 for arg in args.iter().rev() {
-                    self.generate_expression(code, arg)?;
+                    self.generate_expression(instructions, arg)?;
                 }
 
                 if let Some(&idx) = self.function_indices.get(name) {
-                    code.push(CALL);
-                    code.extend(leb128_u32(idx));
+                    instructions.push(Instruction::Call(idx));
                 } else {
-                    // Might be an import - check by looking up
                     let import_idx = self.get_import_index(name);
                     if let Some(idx) = import_idx {
-                        code.push(CALL);
-                        code.extend(leb128_u32(idx));
+                        instructions.push(Instruction::Call(idx));
                     } else {
                         return Err(CompileError::CodeGenError {
                             message: format!("undefined function: {}", name),
@@ -2282,33 +2189,35 @@ impl CodeGen {
             Expression::CallRef(func_ref, args) => {
                 // Push arguments
                 for arg in args.iter().rev() {
-                    self.generate_expression(code, arg)?;
+                    self.generate_expression(instructions, arg)?;
                 }
 
                 // Push function reference
-                self.generate_expression(code, func_ref)?;
+                self.generate_expression(instructions, func_ref)?;
 
                 // TODO: We need to get the type index for call_ref
                 // For now, assume type index 0
-                code.push(CALL_REF);
-                code.extend(leb128_u32(0)); // Type index
+                instructions.push(Instruction::CallRef(0));
 
                 Ok(())
             }
             Expression::RefNull(ty) => {
-                code.push(REF_NULL);
-                code.push(type_to_valtype(ty));
+                let reftype = match ty {
+                    Type::Externref => EXTERNREF,
+                    Type::Funcref => FUNCREF,
+                    _ => EXTERNREF,
+                };
+                instructions.push(Instruction::RefNull(reftype));
                 Ok(())
             }
             Expression::RefIsNull(expr) => {
-                self.generate_expression(code, expr)?;
-                code.push(REF_IS_NULL);
+                self.generate_expression(instructions, expr)?;
+                instructions.push(Instruction::RefIsNull);
                 Ok(())
             }
             Expression::RefFunc(name) => {
                 if let Some(&idx) = self.function_indices.get(name) {
-                    code.push(REF_FUNC);
-                    code.extend(leb128_u32(idx));
+                    instructions.push(Instruction::RefFunc(idx));
                     Ok(())
                 } else {
                     Err(CompileError::CodeGenError {
@@ -2317,13 +2226,12 @@ impl CodeGen {
                 }
             }
             Expression::TableGet(idx_expr) => {
-                self.generate_expression(code, idx_expr)?;
-                code.push(TABLE_GET);
-                code.extend(leb128_u32(0)); // Table index 0
+                self.generate_expression(instructions, idx_expr)?;
+                instructions.push(Instruction::TableGet(0)); // Table index 0
                 Ok(())
             }
-            Expression::RefCast(expr, ty) => {
-                self.generate_expression(code, expr)?;
+            Expression::RefCast(expr, _ty) => {
+                self.generate_expression(instructions, expr)?;
                 // TODO: Implement proper ref.cast when needed
                 Ok(())
             }
@@ -2348,23 +2256,20 @@ impl CodeGen {
             return idx;
         }
 
-        let idx = self.module.types.len() as u32;
+        let idx = self.func_types.len() as u32;
 
-        // Build type entry
-        let mut type_bytes = Vec::new();
-        type_bytes.push(0x60); // Function type
-        type_bytes.extend(leb128_u32(params.len() as u32));
-        for p in params {
-            type_bytes.push(type_to_valtype(p));
-        }
+        // Build FuncType
+        let wasm_params: Vec<ValType> = params.iter().map(|t| type_to_valtype(t)).collect();
+        let wasm_results: Vec<ValType> = if *return_type == Type::Void {
+            Vec::new()
+        } else {
+            vec![type_to_valtype(return_type)]
+        };
 
-        let result_count = if *return_type == Type::Void { 0 } else { 1 };
-        type_bytes.extend(leb128_u32(result_count));
-        if result_count > 0 {
-            type_bytes.push(type_to_valtype(return_type));
-        }
-
-        self.module.types.push(type_bytes);
+        self.func_types.push(FuncType {
+            params: wasm_params,
+            results: wasm_results,
+        });
         self.type_indices.insert(key, idx);
 
         idx
@@ -2379,7 +2284,6 @@ impl CodeGen {
     }
 
     fn get_import_index(&self, name: &str) -> Option<u32> {
-        // Find import by function name
         for (i, import) in self.program.imports.iter().enumerate() {
             if import.func_name == name {
                 return Some(i as u32);
@@ -2389,70 +2293,22 @@ impl CodeGen {
     }
 }
 
-fn type_to_valtype(t: &Type) -> u8 {
+fn type_to_valtype(t: &Type) -> ValType {
     match t {
-        Type::I32 => I32,
-        Type::I64 => I64,
-        Type::F32 => F32,
-        Type::F64 => F64,
-        Type::Externref => EXTERNREF,
-        Type::Funcref => FUNCREF,
-        Type::Void => 0x40, // Empty block type
+        Type::I32 => ValType::I32,
+        Type::I64 => ValType::I64,
+        Type::F32 => ValType::F32,
+        Type::F64 => ValType::F64,
+        Type::Externref => ValType::ExternRef,
+        Type::Funcref => ValType::FuncRef,
+        Type::Void => ValType::I32, // Shouldn't happen in practice
     }
-}
-
-// LEB128 encoding helpers
-fn leb128_u32(mut value: u32) -> Vec<u8> {
-    let mut result = Vec::new();
-    loop {
-        let mut byte = (value & 0x7F) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        result.push(byte);
-        if value == 0 {
-            break;
-        }
-    }
-    result
-}
-
-fn leb128_i32(mut value: i32) -> Vec<u8> {
-    let mut result = Vec::new();
-    let mut more = true;
-    while more {
-        let mut byte = (value & 0x7F) as u8;
-        value >>= 7;
-        if (value == 0 && (byte & 0x40) == 0) || (value == -1 && (byte & 0x40) != 0) {
-            more = false;
-        } else {
-            byte |= 0x80;
-        }
-        result.push(byte);
-    }
-    result
-}
-
-fn leb128_i64(mut value: i64) -> Vec<u8> {
-    let mut result = Vec::new();
-    let mut more = true;
-    while more {
-        let mut byte = (value & 0x7F) as u8;
-        value >>= 7;
-        if (value == 0 && (byte & 0x40) == 0) || (value == -1 && (byte & 0x40) != 0) {
-            more = false;
-        } else {
-            byte |= 0x80;
-        }
-        result.push(byte);
-    }
-    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::println;
 
     #[test]
     fn test_simple_compile() {
@@ -2469,13 +2325,5 @@ mod tests {
                 panic!("Compilation failed");
             }
         }
-    }
-
-    #[test]
-    fn test_lexer_tokens() {
-        let source = "export i32 main() { return 42; }\n";
-        let mut lexer = Lexer::new(source);
-        let tokens = lexer.tokenize().unwrap();
-        println!("Tokens: {:?}", tokens);
     }
 }

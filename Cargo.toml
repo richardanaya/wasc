@@ -1,10 +1,10 @@
 [package]
 name = "wasc"
-version = "0.1.0"
+version = "2024.0.0"
 edition = "2021"
 
 [dependencies]
-webassembly = { git = "https://github.com/richardanaya/webassembly-rs.git" }
+webassembly = "0.10.0"
 
 [[bin]]
 name = "wasc"
