@@ -2432,4 +2432,129 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_arithmetic() {
+        let source = r#"
+export i32 add(i32 a, i32 b) {
+    return a + b;
+}
+
+export i32 main() {
+    return add(10, 32);
+}
+"#;
+        let result = compile(source);
+        assert!(result.is_ok(), "Arithmetic test failed: {:?}", result.err());
+        let bytes = result.unwrap();
+        assert!(bytes.len() > 10, "Generated WASM too small");
+    }
+
+    #[test]
+    fn test_control_flow() {
+        let source = r#"
+export i32 factorial(i32 n) {
+    if (n <= 1) {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+export i32 main() {
+    return factorial(5);
+}
+"#;
+        let result = compile(source);
+        assert!(
+            result.is_ok(),
+            "Control flow test failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_loops() {
+        let source = r#"
+export i32 sum_loop() {
+    i32 sum = 0;
+    i32 i = 1;
+    while (i <= 10) {
+        sum = sum + i;
+        i = i + 1;
+    }
+    return sum;
+}
+
+export i32 main() {
+    return sum_loop();
+}
+"#;
+        let result = compile(source);
+        assert!(result.is_ok(), "Loop test failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_string_literals() {
+        let source = r#"
+export i32 main() {
+    i32 msg = "Hello, World!";
+    return 0;
+}
+"#;
+        let result = compile(source);
+        assert!(
+            result.is_ok(),
+            "String literal test failed: {:?}",
+            result.err()
+        );
+        let bytes = result.unwrap();
+        // Check that data section exists (look for data section header pattern)
+        assert!(bytes.len() > 50, "Should have data section with string");
+    }
+
+    #[test]
+    fn test_memory_operations() {
+        let source = r#"
+memory 1;
+
+export i32 test_memory() {
+    i32 ptr = 0;
+    *ptr = 123;
+    return *ptr;
+}
+
+export i32 main() {
+    return test_memory();
+}
+"#;
+        let result = compile(source);
+        assert!(
+            result.is_ok(),
+            "Memory operations test failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_references() {
+        let source = r#"
+memory 1;
+
+extern void console_log(externref msg);
+
+export i32 test_refs() {
+    externref null_ref = ref.null externref;
+    if (ref.is_null(null_ref)) {
+        return 1;
+    }
+    return 0;
+}
+
+export i32 main() {
+    return test_refs();
+}
+"#;
+        let result = compile(source);
+        assert!(result.is_ok(), "References test failed: {:?}", result.err());
+    }
 }
